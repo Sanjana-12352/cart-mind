@@ -1,6 +1,5 @@
 import os
 from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.messages import SystemMessage, HumanMessage
 from pydantic import BaseModel, Field
@@ -8,26 +7,163 @@ from typing import List, Optional
 
 
 class CategoryItems(BaseModel):
-    label: str = Field(description="The category name. Short and clear.")
+    label: str = Field(description="SPECIFIC product category name. Never generic. Example: 'Dining Table' not 'Furniture'. 'Desk Lamp' not 'Lighting'. 'Stationery Organizer' not 'Storage'.")
     icon: str = Field(description="A single relevant emoji for this category.")
-    search_terms: List[str] = Field(description="List of 3 to 5 optimized Amazon search terms.")
+    search_terms: List[str] = Field(description="List of 3 to 5 optimized Amazon search terms specific to this category.")
 
 
 class ExpandedQuery(BaseModel):
     categories: List[CategoryItems] = Field(
-        description="Complete list of ALL categories needed. Minimum 4, maximum 10."
+        description="Complete list of ALL specific categories needed. Minimum 4, maximum 10. Every label must be a specific product name, never a generic word."
     )
 
 
 DOMAIN_PROMPTS = {
-    "fashion": "You are an expert fashion stylist. List every item needed for a complete look including clothing, footwear, bags, jewellery, and beauty essentials.",
-    "home_setup": "You are an expert interior designer. List every item needed to completely set up the space including furniture, decor, lighting, storage, linen, and kitchenware.",
-    "electronics": "You are an expert tech consultant. List every item needed for a complete tech setup including primary device, peripherals, cables, storage, and accessories.",
-    "office": "You are an expert workspace designer. List every item needed for a productive workspace including desk, chair, monitor, keyboard, mouse, lighting, and storage.",
-    "beauty": "You are an expert beauty consultant. List every product needed for a complete routine including cleanser, toner, serum, moisturiser, SPF, makeup, and tools.",
-    "baby": "You are an expert baby product specialist. List every item needed for a safe setup including furniture, bedding, feeding, bathing, clothing, toys, and safety items.",
-    "fitness": "You are an expert fitness trainer. List every item needed for a complete workout setup including equipment, clothing, footwear, supplements, and accessories.",
-    "general": "You are an expert personal shopper. List every item needed to completely fulfill the shopping goal grouped into logical categories."
+    "fashion": """
+        You are an expert fashion stylist and personal shopper.
+        List every item needed for a complete look.
+        Use SPECIFIC labels:
+        'Dress' not 'Clothing'
+        'Block Heels' not 'Footwear'
+        'Clutch Bag' not 'Bags'
+        'Statement Earrings' not 'Jewellery'
+        'Lip Gloss' not 'Beauty'
+        Think: outfit, footwear, bags, jewellery, beauty essentials.
+        Consider the occasion and style mentioned.
+    """,
+
+    "home_setup": """
+        You are an expert interior designer and home stylist.
+        List every item needed for the SPECIFIC space mentioned in the query.
+        Use SPECIFIC labels based on the space:
+
+        For DINING AREA:
+        'Dining Table', 'Dining Chairs', 'Dinner Plates',
+        'Glassware', 'Cutlery Set', 'Tablecloth',
+        'Placemats', 'Pendant Light', 'Centerpiece'
+
+        For BEDROOM:
+        'Bed Frame', 'Mattress', 'Pillow Set',
+        'Bedsheet Set', 'Wardrobe', 'Bedside Table',
+        'Bedroom Lamp', 'Curtains', 'Mirror'
+
+        For LIVING ROOM:
+        'Sofa Set', 'Coffee Table', 'TV Unit',
+        'Curtains', 'Area Rug', 'Cushion Set',
+        'Wall Art', 'Floor Lamp', 'Bookshelf'
+
+        For KITCHEN:
+        'Cookware Set', 'Dinner Set', 'Storage Containers',
+        'Kitchen Appliances', 'Knife Set', 'Cutting Board'
+
+        NEVER use generic labels like 'Furniture', 'Decor',
+        'Lighting', 'Storage', 'Linen', 'Kitchenware'.
+        ALWAYS use specific product names as labels.
+    """,
+
+    "electronics": """
+        You are an expert tech consultant and setup specialist.
+        List every item needed for a complete tech setup.
+        Use SPECIFIC labels:
+        'Gaming Monitor' not 'Monitor'
+        'Mechanical Keyboard' not 'Keyboard'
+        'Wireless Mouse' not 'Mouse'
+        'Noise Cancelling Headphones' not 'Headphones'
+        Think: primary device, peripherals, cables,
+        storage, stands, cooling, and accessories.
+    """,
+
+    "office": """
+        You are an expert workspace and study setup specialist.
+        List every item needed for the specific setup mentioned.
+        Use SPECIFIC labels based on persona:
+
+        For STUDENT STUDY DESK:
+        'Study Table', 'Study Chair', 'Desk Lamp',
+        'Stationery Organizer', 'Laptop Stand',
+        'Headphones', 'Whiteboard', 'Notebook Set',
+        'Pen Holder', 'Book Stand'
+
+        For PROFESSIONAL HOME OFFICE:
+        'Office Desk', 'Ergonomic Chair', 'Monitor',
+        'Mechanical Keyboard', 'Wireless Mouse',
+        'Webcam', 'Cable Management', 'Desk Organizer',
+        'Monitor Stand', 'Ring Light'
+
+        For DEVELOPER SETUP:
+        'Dual Monitor Setup', 'Mechanical Keyboard',
+        'Ergonomic Chair', 'Monitor Stand',
+        'Webcam', 'USB Hub', 'Cable Management',
+        'Desk Mat', 'External Hard Drive'
+
+        NEVER use generic labels like 'Furniture',
+        'Tech', 'Accessories', 'Storage'.
+        ALWAYS use specific product names.
+    """,
+
+    "beauty": """
+        You are an expert beauty consultant and skincare specialist.
+        List every product needed for a complete routine.
+        Use SPECIFIC labels:
+        'Face Wash' not 'Cleanser'
+        'Vitamin C Serum' not 'Serum'
+        'Moisturiser SPF' not 'Moisturiser'
+        'Kajal' not 'Eye Makeup'
+        'Lipstick' not 'Lip Products'
+        Think: cleanser, toner, serum, moisturiser,
+        SPF, makeup, tools, and treatments.
+        Consider skin type and concerns if mentioned.
+    """,
+
+    "baby": """
+        You are an expert baby product specialist and nursery designer.
+        List every item needed for a safe and complete baby setup.
+        Use SPECIFIC labels:
+        'Baby Crib' not 'Furniture'
+        'Baby Monitor' not 'Electronics'
+        'Feeding Bottle Set' not 'Feeding'
+        'Baby Bath Tub' not 'Bathing'
+        'Swaddle Blanket' not 'Linen'
+        Think: furniture, bedding, feeding, bathing,
+        clothing, toys, safety items, and care products.
+        Safety is the top priority.
+    """,
+
+    "fitness": """
+        You are an expert fitness trainer and gym setup specialist.
+        List every item needed for a complete workout setup.
+        Use SPECIFIC labels:
+        'Yoga Mat' not 'Equipment'
+        'Resistance Bands' not 'Accessories'
+        'Dumbbell Set' not 'Weights'
+        'Gym Shoes' not 'Footwear'
+        'Protein Supplement' not 'Nutrition'
+        Think: equipment, clothing, footwear,
+        supplements, accessories, and recovery items.
+    """,
+
+    "party": """
+        You are an expert event planner and party organizer.
+        List every item needed for a successful party or event.
+        Use SPECIFIC labels:
+        'Party Decorations' not 'Decor'
+        'Balloon Set' not 'Balloons'
+        'Party Tableware' not 'Tableware'
+        'Party Outfit' not 'Clothing'
+        'Return Gifts' not 'Gifts'
+        Think: decorations, food and drinks, tableware,
+        party supplies, games, gifts, clothing, music setup.
+        Consider the occasion and theme mentioned.
+    """,
+
+    "general": """
+        You are an expert personal shopper and product specialist.
+        List every item needed to completely fulfill the shopping goal.
+        Use SPECIFIC product names as labels.
+        NEVER use generic words like 'Items', 'Products',
+        'Accessories', 'Supplies', 'Equipment'.
+        Always be specific to what the query is asking for.
+    """
 }
 
 
@@ -54,11 +190,14 @@ async def expand_query(
 
     system_content = (
         domain_expertise
-        + "\n\nReturn a JSON object with a 'categories' key. "
-        + "Each category must have 'label', 'icon', and 'search_terms'. "
-        + "Minimum 4 categories, maximum 10. "
-        + "Search terms must be specific Amazon ready queries for the Indian market. "
-        + "Return ONLY valid JSON, nothing else."
+        + "\n\nCRITICAL RULES:\n"
+        + "1. Return ONLY a valid JSON object with a 'categories' key\n"
+        + "2. Each category must have 'label', 'icon', 'search_terms'\n"
+        + "3. Minimum 4 categories, maximum 10 categories\n"
+        + "4. Labels must be SPECIFIC product names NEVER generic words\n"
+        + "5. Search terms must be specific Amazon ready queries\n"
+        + "6. Consider Indian market and pricing\n"
+        + "7. Return ONLY JSON, no text, no markdown, no explanation\n"
     )
 
     human_content = (
@@ -67,7 +206,7 @@ async def expand_query(
         f"Occasion: {occasion if occasion else 'not specified'}\n"
         f"Budget: {budget if budget else 'not specified'}\n"
         f"Persona: {persona if persona else 'not specified'}\n\n"
-        "Return the JSON object with all categories needed."
+        "Return JSON with specific product categories and Amazon search terms."
     )
 
     messages = [
