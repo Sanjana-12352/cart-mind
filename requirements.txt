@@ -1,11 +1,7 @@
 fastapi
 uvicorn
 python-dotenv
-openai
 langchain
-langchain-openai
-langchain-community
+langchain-anthropic
 langchain-core
-chromadb
 pydantic
-httpx
