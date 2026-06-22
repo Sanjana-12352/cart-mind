@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Union
 
 
 class QueryRequest(BaseModel):
@@ -12,7 +12,7 @@ class IntentOutput(BaseModel):
     budget: Optional[float] = None
     currency: Optional[str] = "INR"
     persona: Optional[str] = None
-    quantity: Optional[int] = None
+    quantity: Optional[Union[int, str]] = None
 
 
 class Category(BaseModel):
