@@ -1,28 +1,13 @@
 from pydantic import BaseModel
-from typing import List, Optional, Union
+from typing import List, Optional, Any
 
 
 class QueryRequest(BaseModel):
     query: str
 
 
-class IntentOutput(BaseModel):
-    domain: str
-    occasion: Optional[str] = None
-    budget: Optional[float] = None
-    currency: Optional[str] = "INR"
-    persona: Optional[str] = None
-    quantity: Optional[Union[int, str]] = None
-
-
-class Category(BaseModel):
-    label: str
-    icon: Optional[str] = "🛍️"
-    products: List[str] = []
-
-
-class QueryResponse(BaseModel):
-    query: str
-    intent: IntentOutput
-    labels: List[str]
-    categories: List[Category]
+class ClassifyResponse(BaseModel):
+    pipeline: Any
+    routing: str
+    zero_result_rescue_triggered: bool
+    ui: Any
