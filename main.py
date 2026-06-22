@@ -7,7 +7,7 @@ load_dotenv()
 
 app = FastAPI(
     title="CartMind Search Intelligence API",
-    description="Staples-grade search intelligence powered by Claude Sonnet 4.6",
+    description="search intelligence -cartmind",
     version="2.0.0"
 )
 
