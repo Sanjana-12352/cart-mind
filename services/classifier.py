@@ -1,162 +1,203 @@
 import os
 import json
+import time
 import anthropic
-from langchain_core.messages import SystemMessage, HumanMessage
 
 
-SYSTEM_PROMPT = """You are the search intelligence layer for Staples.com.
+SYSTEM_PROMPT = """Search intelligence for office/school supply platform.
 
-## STAPLES CATALOG
-Furniture: desks, chairs, tables, shelving, whiteboards
-Technology: laptops, monitors, printers, ink, keyboards, mice, webcams, headsets
-Office Supplies: pens, paper, folders, binders, tape, staples, clips, labels, envelopes
-Breakroom: coffee, snacks, water, disposable cups/plates, appliances
-Cleaning: wipes, paper towels, soap, sanitizer, trash bags, safety supplies
-School: notebooks, pencils, backpacks, art supplies, calculators, classroom supplies
-Services: Print Services, Tech Services, Educator Discount, Staples Rewards, B2B Accounts
-Shipping: boxes, packing tape, bubble wrap, labels
+CATALOG: Furniture, Technology, Office Supplies, Breakroom, Cleaning, School Supplies, Services, Shipping
 
-## 9 INTENT CLASSES
-1. occasion_goal: broad goal needing multiple categories. "home office setup" "back to school"
-2. keyword_product: user knows exactly what they want. "HP 65 ink" "black gel pen"
-3. brand_lookup: brand-first. "Keurig machines" "Post-it notes"
-4. clarification_needed: ambiguous or missing entity. "I need paper" "which ink fits my printer"
-5. b2b_escalation: quantity>50, invoicing, net30, business account. "500 chairs" "invoice me"
-6. service_redirect: wants service not product. "print this" "fix my computer" "teacher discount"
-7. replenishment: ran out, reordering. "out of staples" "need more coffee pods"
-8. zero_result_rescue: not in Staples catalog. gardening, clothing, groceries, car parts
-9. attribute_question: asking about specs. "does it come assembled" "is this acid-free"
+9 INTENTS:
+1. occasion_goal - broad goal, multiple categories
+2. keyword_product - knows exactly what they want
+3. brand_lookup - brand first
+4. clarification_needed - ambiguous or missing info
+5. b2b_escalation - qty>50, invoicing, business account
+6. service_redirect - wants service done for them
+7. replenishment - ran out, reordering
+8. zero_result_rescue - not in catalog
+9. attribute_question - asking about specs
 
-## CLASSIFICATION RULES
-- 2+ categories involved → occasion_goal
-- Missing printer/laptop/stapler model → clarification_needed
-- Quantity > 50 → b2b_escalation
-- "print/fix/copy for me" → service_redirect
-- competitor mentioned → clarification_needed + competitor_mention flag
-- "staples" lowercase → fastener product (keyword_product or replenishment)
-- confidence < 0.7 + out of catalog → zero_result_rescue
-- teacher/classroom → educator_discount_prompt=true
-- NEVER return null for routing or message
+RULES:
+- 2+ categories → occasion_goal
+- missing model/type → clarification_needed
+- qty>50 → b2b_escalation
+- service request → service_redirect
+- out of catalog → zero_result_rescue
+- replenishment + ambiguous → clarification_needed with options
 
-## REPLENISHMENT RULES - ALWAYS CHECK MISSING ENTITIES
-When replenishment detected, check if product variant is ambiguous:
+OUTPUT: Return ONLY this JSON. Raw. No markdown.
 
-out of staples / need more staples / ran out of staples:
-  intent_class: replenishment
-  missing_entities: [staple_size]
-  routing: clarification_needed
-  clarification_question: Which staple size do you need?
-  clarification_options: #10 Standard, #26 Heavy-duty, #35 Specialty, Not sure show all
+For occasion_goal:
+{"i":"occasion_goal","r":"multi_category_guided","c":0.95,"n":"normalized query","cats":[{"l":"Label","q":"br query"}],"msg":"headline|subtitle"}
 
-out of ink / need more toner / ran out of ink:
-  intent_class: replenishment
-  missing_entities: [printer_model]
-  routing: clarification_needed
-  clarification_question: What printer model do you have?
+For keyword_product:
+{"i":"keyword_product","r":"direct_search","c":0.95,"n":"normalized","brand":null,"msg":"headline|subtitle"}
 
-out of paper / need more paper:
-  intent_class: replenishment
-  missing_entities: [paper_type]
-  routing: clarification_needed
-  clarification_question: What type of paper do you need?
-  clarification_options: Copy Paper, Cardstock, Notebook Paper, Photo Paper, Construction Paper
+For brand_lookup:
+{"i":"brand_lookup","r":"brand_filtered","c":0.95,"n":"normalized","brand":"brand name","msg":"headline|subtitle"}
 
-out of coffee / need more coffee pods:
-  intent_class: replenishment
-  routing: replenishment
-  No clarification needed - product is clear
+For clarification_needed:
+{"i":"clarification_needed","r":"clarification_needed","c":0.95,"n":"normalized","q":"question?","opts":[{"l":"label","v":"value"}],"msg":"headline|subtitle"}
 
-RULE: If product variant is ambiguous for replenishment → clarification_needed
-Only skip clarification if product is 100% specific
+For b2b_escalation:
+{"i":"b2b_escalation","r":"b2b_escalation","c":0.95,"n":"normalized","reason":"short","msg":"headline|subtitle"}
 
-## 10 UNIVERSAL PRINCIPLES
-P1: Every query fits one of the 9 classes. No exceptions.
-P2: 2+ categories involved → occasion_goal.
-P3: Missing critical entity → clarification_needed. Ask ONE question.
-P4: Quantity > 50 → b2b_escalation.
-P5: User wants something DONE for them → service_redirect.
-P6: Competitor mentioned → clarification_needed + competitor_mention flag.
-P7: staples lowercase = fastener product.
-P8: confidence < 0.7 AND out of catalog → zero_result_rescue.
-P9: Teacher/classroom context → educator_discount_prompt=true.
-P10: NEVER return null for routing or message. Every query gets a useful answer.
+For service_redirect:
+{"i":"service_redirect","r":"service_redirect","c":0.95,"n":"normalized","svc":"print_services|tech_services|educator_discount|loyalty_program","msg":"headline|subtitle"}
 
-## OUTPUT FORMAT
-Return ONLY valid raw JSON. No markdown. No backticks. No explanation.
+For replenishment:
+{"i":"replenishment","r":"replenishment","c":0.95,"n":"normalized","product":"short","msg":"headline|subtitle"}
 
-{
-  "pipeline": {
-    "step1_normalization": {"raw_query":"","normalized":"","spell_corrected":false,"filler_removed":false},
-    "step2_intent": {"intent_class":"","confidence":0.95,"reasoning":""},
-    "step3_entities": {"persona":null,"persona_ambiguous":false,"space":null,"event":null,"group_size":null,"quantity_hint":null,"b2b_context":false,"recurring_purchase":false,"brand_preference":null,"price_sensitivity":null,"missing_entities":[],"competitor_mention":null,"urgency":false,"educator_discount_prompt":false},
-    "step4_decomposition": null,
-    "step5_clarification": null
-  },
-  "output": {
-    "intent_class":"","routing":"","zero_result_rescue_triggered":false,"out_of_catalog":false,"out_of_catalog_reason":null,"goal":null,"nav_categories":[],"decomposed_sections":[],"clarification":null,"b2b_escalation":null,"service_redirect":null,"replenishment":null,"rescue_suggestions":[],"filters":{},"confidence":0.95,
-    "message":{"headline":"","subtitle":""}
-  }
-}
+For zero_result_rescue:
+{"i":"zero_result_rescue","r":"zero_result_rescue","c":0.3,"n":"normalized","reason":"short","rescue":[{"l":"label","q":"br query"}],"msg":"headline|subtitle"}
 
-For occasion_goal populate step4_decomposition:
-{"goal":"string","nav_categories":[{"label":"","category_id":"cat_x","plp_url":"/path","br_query":""}],"decomposed_sections":[{"section_title":"","category_ids":[],"featured_br_query":""}]}
-Max 8 nav_categories. Max 4 decomposed_sections. Copy into output fields.
+For attribute_question:
+{"i":"attribute_question","r":"attribute_question","c":0.95,"n":"normalized","attr":"attribute","msg":"headline|subtitle"}
 
-For clarification_needed populate step5_clarification:
-{"clarification_question":"","clarification_options":[]}
-Copy into output.clarification as {"question":"","options":[]}.
+RULES FOR COMPACT OUTPUT:
+- cats: MAX 4 items
+- opts: MAX 4 items
+- rescue: MAX 3 items
+- q in cats: MAX 4 words
+- msg format: "headline|subtitle" as single pipe-separated string
+- headline MAX 4 words
+- subtitle MAX 8 words
+- ALL values as short as possible
+- TARGET: 150-200 tokens total"""
 
-For b2b_escalation: output.b2b_escalation = {"reason":"","action":""}
-For service_redirect: output.service_redirect = {"service_type":"","cta":""}
-For replenishment: output.replenishment = {"product_hint":"","reorder_message":""}
-For zero_result_rescue: output.rescue_suggestions = [{"label":"","br_query":""}] max 3 items
 
-ROUTING VALUES: multi_category_guided, direct_search, brand_filtered, zero_result_rescue, clarification_needed, b2b_escalation, service_redirect, replenishment, attribute_question, compatibility_tool"""
+def expand_result(raw_result: dict, query: str) -> dict:
+    """
+    Expands the compact Claude response into full format
+    so the API response is still rich and useful
+    """
+    intent = raw_result.get("i", "occasion_goal")
+    routing = raw_result.get("r", "multi_category_guided")
+    confidence = raw_result.get("c", 0.95)
+    normalized = raw_result.get("n", query)
+
+    msg_raw = raw_result.get("msg", "Results|Here are your results")
+    msg_parts = msg_raw.split("|", 1)
+    headline = msg_parts[0] if msg_parts else "Results"
+    subtitle = msg_parts[1] if len(msg_parts) > 1 else "Find what you need."
+
+    result = {
+        "intent_class": intent,
+        "routing": routing,
+        "confidence": confidence,
+        "normalized": normalized,
+        "spell_corrected": normalized.lower() != query.lower(),
+        "message": {
+            "headline": headline,
+            "subtitle": subtitle
+        },
+        "nav_categories": [],
+        "clarification": None,
+        "b2b_escalation": None,
+        "service_redirect": None,
+        "replenishment": None,
+        "rescue_suggestions": [],
+        "zero_result_rescue_triggered": intent == "zero_result_rescue",
+        "out_of_catalog": intent == "zero_result_rescue",
+        "brand_preference": raw_result.get("brand"),
+        "educator_discount_prompt": False
+    }
+
+    if intent == "occasion_goal":
+        cats = raw_result.get("cats", [])
+        result["nav_categories"] = [
+            {
+                "label": c.get("l", ""),
+                "category_id": f"cat_{c.get('l','x').lower().replace(' ','_')}",
+                "plp_url": f"/category/{c.get('l','x').lower().replace(' ','-')}",
+                "br_query": c.get("q", "")
+            }
+            for c in cats
+        ]
+
+    elif intent == "clarification_needed":
+        result["clarification"] = {
+            "question": raw_result.get("q", "Can you be more specific?"),
+            "options": raw_result.get("opts", [])
+        }
+
+    elif intent == "b2b_escalation":
+        result["b2b_escalation"] = {
+            "reason": raw_result.get("reason", "Bulk order detected"),
+            "action": "Contact our B2B team for pricing"
+        }
+
+    elif intent == "service_redirect":
+        result["service_redirect"] = {
+            "service_type": raw_result.get("svc", "print_services"),
+            "cta": "Get started"
+        }
+
+    elif intent == "replenishment":
+        result["replenishment"] = {
+            "product_hint": raw_result.get("product", ""),
+            "reorder_message": "Time to restock!"
+        }
+
+    elif intent == "zero_result_rescue":
+        rescue = raw_result.get("rescue", [])
+        result["rescue_suggestions"] = [
+            {"label": r.get("l", ""), "br_query": r.get("q", "")}
+            for r in rescue
+        ]
+        result["out_of_catalog_reason"] = raw_result.get("reason", "Not in catalog")
+
+    elif intent == "attribute_question":
+        result["attribute"] = raw_result.get("attr", "")
+
+    return result
 
 
 async def classify_query(query: str) -> dict:
 
-    # Using Anthropic SDK directly for prompt caching
-    # LangChain does not support cache_control yet
     client = anthropic.AsyncAnthropic(
         api_key=os.getenv("ANTHROPIC_API_KEY")
     )
 
-    response = await client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=4000,
-        temperature=0,
+    t_start = time.time()
 
+    response = await client.messages.create(
+        model="claude-haiku-4-5",
+        max_tokens=400,
+        temperature=0,
         system=[
             {
                 "type": "text",
                 "text": SYSTEM_PROMPT,
                 "cache_control": {"type": "ephemeral"}
-                
             }
         ],
-
         messages=[
             {
                 "role": "user",
                 "content": f"Query: {query}"
-                # Only the user query changes each time
-                # System prompt is served from cache
             }
         ]
     )
 
-    raw = response.content[0].text.strip()
+    t_claude = time.time() - t_start
 
-    # Cache usage info for debugging
     if hasattr(response, "usage"):
         usage = response.usage
         cache_read = getattr(usage, "cache_read_input_tokens", 0)
         cache_create = getattr(usage, "cache_creation_input_tokens", 0)
+        output_tokens = getattr(usage, "output_tokens", 0)
+
         if cache_read > 0:
-            print(f" Cache HIT: {cache_read} tokens served from cache")
+            print(f" Cache HIT: {cache_read} tokens from cache")
         elif cache_create > 0:
             print(f" Cache CREATED: {cache_create} tokens cached")
+
+        print(f" Claude API: {t_claude:.2f}s | Output tokens: {output_tokens}")
+
+    raw = response.content[0].text.strip()
 
     if raw.startswith("```"):
         raw = raw.split("```")[1]
@@ -165,69 +206,32 @@ async def classify_query(query: str) -> dict:
     raw = raw.strip()
 
     try:
-        result = json.loads(raw)
+        compact_result = json.loads(raw)
+        result = expand_result(compact_result, query)
 
     except json.JSONDecodeError as e:
-        print(f"⚠️ JSON parse error: {e}")
+        print(f" JSON error: {e}")
         result = {
-            "pipeline": {
-                "step1_normalization": {
-                    "raw_query": query,
-                    "normalized": query,
-                    "spell_corrected": False,
-                    "filler_removed": False
-                },
-                "step2_intent": {
-                    "intent_class": "occasion_goal",
-                    "confidence": 0.7,
-                    "reasoning": "Fallback response"
-                },
-                "step3_entities": {
-                    "persona": None, "persona_ambiguous": False,
-                    "space": None, "event": None, "group_size": None,
-                    "quantity_hint": None, "b2b_context": False,
-                    "recurring_purchase": False, "brand_preference": None,
-                    "price_sensitivity": None, "missing_entities": [],
-                    "competitor_mention": None, "urgency": False,
-                    "educator_discount_prompt": False
-                },
-                "step4_decomposition": None,
-                "step5_clarification": None
+            "intent_class": "occasion_goal",
+            "routing": "multi_category_guided",
+            "confidence": 0.7,
+            "normalized": query,
+            "spell_corrected": False,
+            "message": {
+                "headline": f"Shopping for {query}",
+                "subtitle": "Find what you need."
             },
-            "output": {
-                "intent_class": "occasion_goal",
-                "routing": "multi_category_guided",
-                "zero_result_rescue_triggered": False,
-                "out_of_catalog": False,
-                "out_of_catalog_reason": None,
-                "goal": query,
-                "nav_categories": [],
-                "decomposed_sections": [],
-                "clarification": None,
-                "b2b_escalation": None,
-                "service_redirect": None,
-                "replenishment": None,
-                "rescue_suggestions": [],
-                "filters": {},
-                "confidence": 0.7,
-                "message": {
-                    "headline": f"Shopping for: {query}",
-                    "subtitle": "Find what you need at Staples."
-                }
-            }
+            "nav_categories": [],
+            "clarification": None,
+            "b2b_escalation": None,
+            "service_redirect": None,
+            "replenishment": None,
+            "rescue_suggestions": [],
+            "zero_result_rescue_triggered": False,
+            "out_of_catalog": False
         }
 
-    intent = (
-        result.get("output", {}).get("intent_class")
-        or result.get("pipeline", {}).get("step2_intent", {}).get("intent_class")
-        or "unknown"
-    )
-
-    routing = (
-        result.get("output", {}).get("routing")
-        or "unknown"
-    )
-
-    print(f" Intent: {intent} | Routing: {routing}")
+    t_total = time.time() - t_start
+    print(f" Total: {t_total:.2f}s | Intent: {result.get('intent_class')} | Routing: {result.get('routing')}")
 
     return result
