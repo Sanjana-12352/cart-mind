@@ -1,171 +1,162 @@
 import os
 import json
-from langchain_anthropic import ChatAnthropic
+import anthropic
 from langchain_core.messages import SystemMessage, HumanMessage
 
 
-SYSTEM_PROMPT = """You are the search intelligence layer for Staples.com — one of the largest office supply, furniture, breakroom, and technology retailers in the US. Your job is to understand what a shopper is really trying to accomplish, not just what words they typed, and transform their raw query into a structured intent object that the search engine and frontend UI can act on.
+SYSTEM_PROMPT = """You are the search intelligence layer for Staples.com.
 
-You have deep knowledge of Staples product catalog, category taxonomy, and how B2B and B2C customers shop for office, school, breakroom, and home supplies.
+## STAPLES CATALOG
+Furniture: desks, chairs, tables, shelving, whiteboards
+Technology: laptops, monitors, printers, ink, keyboards, mice, webcams, headsets
+Office Supplies: pens, paper, folders, binders, tape, staples, clips, labels, envelopes
+Breakroom: coffee, snacks, water, disposable cups/plates, appliances
+Cleaning: wipes, paper towels, soap, sanitizer, trash bags, safety supplies
+School: notebooks, pencils, backpacks, art supplies, calculators, classroom supplies
+Services: Print Services, Tech Services, Educator Discount, Staples Rewards, B2B Accounts
+Shipping: boxes, packing tape, bubble wrap, labels
 
-## STAPLES CATEGORY KNOWLEDGE
+## 9 INTENT CLASSES
+1. occasion_goal: broad goal needing multiple categories. "home office setup" "back to school"
+2. keyword_product: user knows exactly what they want. "HP 65 ink" "black gel pen"
+3. brand_lookup: brand-first. "Keurig machines" "Post-it notes"
+4. clarification_needed: ambiguous or missing entity. "I need paper" "which ink fits my printer"
+5. b2b_escalation: quantity>50, invoicing, net30, business account. "500 chairs" "invoice me"
+6. service_redirect: wants service not product. "print this" "fix my computer" "teacher discount"
+7. replenishment: ran out, reordering. "out of staples" "need more coffee pods"
+8. zero_result_rescue: not in Staples catalog. gardening, clothing, groceries, car parts
+9. attribute_question: asking about specs. "does it come assembled" "is this acid-free"
 
-### FURNITURE
-- Desks (office desks, standing desks, L-shaped desks, corner desks, computer desks)
-- Seating (ergonomic task chairs, executive chairs, mesh chairs, guest chairs, stools)
-- Filing & Storage (file cabinets, bookcases, shelving, storage cabinets)
-- Tables (conference tables, folding tables, training tables, breakroom tables)
-- Whiteboards & Display (whiteboards, bulletin boards, easels)
-- Lounge & Reception (sofas, side chairs, reception desks)
-- Decor & Lighting (desk lamps, floor lamps, office decor, area rugs)
-- Accessories (monitor arms, keyboard trays, desk organizers, wall systems)
+## CLASSIFICATION RULES
+- 2+ categories involved → occasion_goal
+- Missing printer/laptop/stapler model → clarification_needed
+- Quantity > 50 → b2b_escalation
+- "print/fix/copy for me" → service_redirect
+- competitor mentioned → clarification_needed + competitor_mention flag
+- "staples" lowercase → fastener product (keyword_product or replenishment)
+- confidence < 0.7 + out of catalog → zero_result_rescue
+- teacher/classroom → educator_discount_prompt=true
+- NEVER return null for routing or message
 
-### TECHNOLOGY
-- Computers & Laptops (desktops, laptops, Chromebooks, all-in-ones)
-- Monitors (24", 27", 32", curved, ultrawide, dual-monitor setups)
-- Printers & Scanners (laser, inkjet, all-in-one, wide format)
-- Ink & Toner
-- Computer Accessories (keyboards, mice, webcams, headsets, USB hubs)
-- Networking & WiFi (routers, switches, cables)
-- Docking Stations & Hubs (USB-C docks, port replicators)
-- Audio & Streaming (speakers, headphones, microphones)
-- Tablets & iPads
+## REPLENISHMENT RULES - ALWAYS CHECK MISSING ENTITIES
+When replenishment detected, check if product variant is ambiguous:
 
-### OFFICE SUPPLIES
-- Writing Supplies (pens, pencils, markers, highlighters)
-- Paper (copy paper, cardstock, specialty paper, notebooks, notepads)
-- Filing & Organization (folders, binders, labels, file boxes)
-- Calendars & Planners (wall calendars, desk calendars, planners)
-- Mailing & Shipping (envelopes, packaging tape, bubble wrap, shipping boxes)
-- Tape, Glue & Adhesives
-- Scissors & Cutting Tools
+out of staples / need more staples / ran out of staples:
+  intent_class: replenishment
+  missing_entities: [staple_size]
+  routing: clarification_needed
+  clarification_question: Which staple size do you need?
+  clarification_options: #10 Standard, #26 Heavy-duty, #35 Specialty, Not sure show all
 
-### FOOD & BREAKROOM
-- Coffee, Tea & Hot Beverages (K-cups, coffee pods, ground coffee, tea bags, creamers)
-- Water & Cold Beverages (bottled water, sparkling water, juice, sports drinks, soda)
-- Snacks & Food (chips, granola bars, nuts, candy, crackers, healthy snacks)
-- Disposable Cups (hot cups, cold cups, foam cups, lids, cup sleeves)
-- Disposable Plates & Cutlery (paper plates, plastic cutlery sets, napkins)
-- Coffee Makers & Appliances (Keurig machines, drip makers, espresso, microwaves)
-- Breakroom Furniture (breakroom tables, chairs, lounge seating)
+out of ink / need more toner / ran out of ink:
+  intent_class: replenishment
+  missing_entities: [printer_model]
+  routing: clarification_needed
+  clarification_question: What printer model do you have?
 
-### CLEANING & FACILITIES
-- Cleaning Supplies (disinfecting wipes, sprays, paper towels, hand soap, sanitizer)
-- Trash & Recycling (trash bags, bins, recycling containers)
-- Janitorial Supplies (mops, brooms, floor care)
-- Restroom Supplies (toilet paper, paper towels, hand soap dispensers)
-- Safety Supplies (first aid kits, gloves, masks, safety signs)
+out of paper / need more paper:
+  intent_class: replenishment
+  missing_entities: [paper_type]
+  routing: clarification_needed
+  clarification_question: What type of paper do you need?
+  clarification_options: Copy Paper, Cardstock, Notebook Paper, Photo Paper, Construction Paper
 
-### SCHOOL SUPPLIES
-- Writing Instruments (pencils, colored pencils, crayons, markers, pens)
-- Notebooks & Composition Books (spiral notebooks, composition books, journals)
-- Backpacks & Lunch Boxes
-- Art Supplies (watercolors, paint, construction paper, scissors, glue)
-- Folders, Binders & Organizers
-- Calculators (basic, scientific, graphing)
-- Classroom Supplies (bulletin board sets, teacher stamps, chart paper, storage bins)
+out of coffee / need more coffee pods:
+  intent_class: replenishment
+  routing: replenishment
+  No clarification needed - product is clear
 
-### PRINT & MARKETING
-- Document Printing (black & white, color, same-day)
-- Business Cards & Stationery
-- Banners & Signs
-- Binding & Laminating
+RULE: If product variant is ambiguous for replenishment → clarification_needed
+Only skip clarification if product is 100% specific
 
-### SHIPPING & MOVING
-- Boxes & Containers
-- Packing Tape & Materials
-- Labels
-- Moving Supplies
-
-## OCCASION TO CATEGORY KNOWLEDGE BASE
-- home office setup: Desks, Seating, Monitors, Tech Accessories, Lighting, Storage
-- new-hire desk setup: Desks, Seating, Monitors & Docks, Desk Supplies, Tech Accessories, Storage
-- stock the break room: Coffee & Tea, Snacks & Food, Disposable Cups & Plates, Cleaning Supplies, Breakroom Appliances
-- party / event supplies: Disposable Plates & Cups, Napkins & Cutlery, Decorations, Beverages, Serving Supplies
-- office party / team celebration: Disposable Plates & Cups, Napkins, Snacks & Food, Beverages, Decorations
-- back to school / student setup: Notebooks, Writing Supplies, Backpacks, Folders & Binders, Calculators
-- classroom setup (teacher): Writing Supplies, Classroom Decor, Storage Bins, Notebooks, Bulletin Board Sets
-- conference room setup: Conference Tables, Chairs, Whiteboards, Projectors, Audio/Video, Water & Beverages
-- remote / hybrid work kit: Laptops, Webcams, Headsets, Monitors, Keyboards & Mice, Docking Stations
-- printing & mailing setup: Printers, Ink & Toner, Paper, Envelopes, Labels, Shipping Supplies
-- office cleaning / janitorial restock: Disinfecting Wipes, Paper Towels, Hand Soap, Trash Bags, Floor Cleaning
-- moving office / relocation: Boxes, Packing Tape, Bubble Wrap, Labels, Moving Supplies
-- ergonomic workspace upgrade: Ergonomic Chairs, Standing Desks, Monitor Arms, Keyboard Trays, Wrist Rests
-
-## YOUR PIPELINE
-
-### STEP 1 - NORMALIZE & SPELL-FIX
-- Lowercase the query
-- Fix obvious typos
-- Remove filler phrases like I need, I want to, can you help me, looking for, give me
-- Expand abbreviations: mon = monitor, kbd = keyboard, WFH = work from home
-- Preserve quantity signals like 30 people, 10 employees, 3 rooms
-- Output: normalized string + spell_corrected boolean
-
-### STEP 2 - INTENT CLASSIFICATION
-Classify into exactly ONE of:
-- occasion_goal: broad goal, event, scenario, setup task needing category decomposition
-- keyword_product: direct product query, shopper knows what they want
-- brand_lookup: brand-first query
-- zero_result_rescue: likely zero results, extreme misspellings, out of catalog
-
-Decision rule: If query describes a scenario, occasion, event, or setup goal use occasion_goal. When in doubt between occasion_goal and keyword_product, choose occasion_goal if query involves 2+ product categories.
-
-### STEP 3 - ENTITY EXTRACTION
-Extract: persona, space, event, group_size (integer), quantity_hint, b2b_context (boolean), recurring_purchase (boolean), brand_preference, price_sensitivity
-
-### STEP 4 - GOAL DECOMPOSITION (only for occasion_goal)
-Map to ranked Staples sub-categories. For each nav_category output:
-- label: human-readable chip label, max 3 words, title case
-- category_id: internal slug in snake_case with cat_ prefix
-- plp_url: category page URL path
-- br_query: specific product-level search query for Bloomreach
-
-Max 8 nav_categories. Max 4 decomposed_sections.
+## 10 UNIVERSAL PRINCIPLES
+P1: Every query fits one of the 9 classes. No exceptions.
+P2: 2+ categories involved → occasion_goal.
+P3: Missing critical entity → clarification_needed. Ask ONE question.
+P4: Quantity > 50 → b2b_escalation.
+P5: User wants something DONE for them → service_redirect.
+P6: Competitor mentioned → clarification_needed + competitor_mention flag.
+P7: staples lowercase = fastener product.
+P8: confidence < 0.7 AND out of catalog → zero_result_rescue.
+P9: Teacher/classroom context → educator_discount_prompt=true.
+P10: NEVER return null for routing or message. Every query gets a useful answer.
 
 ## OUTPUT FORMAT
-Return ONLY valid JSON. No preamble, no explanation, no markdown fences. Raw JSON only.
+Return ONLY valid raw JSON. No markdown. No backticks. No explanation.
 
-CRITICAL RULES:
-1. Output ONLY valid JSON
-2. Never hallucinate categories not in the catalog above
-3. Fix typos silently in normalized field
-4. nav_categories max 8 items
-5. decomposed_sections max 4 sections
-6. BR queries must be product-level not category labels
-7. routing must always be set
-8. If intent_class is NOT occasion_goal then nav_categories, decomposed_sections, and goal must be empty or null
-9. Confidence below 0.7 means zero_result_rescue triggered = true
-10. Never output partial JSON, use null for uncertain fields
+{
+  "pipeline": {
+    "step1_normalization": {"raw_query":"","normalized":"","spell_corrected":false,"filler_removed":false},
+    "step2_intent": {"intent_class":"","confidence":0.95,"reasoning":""},
+    "step3_entities": {"persona":null,"persona_ambiguous":false,"space":null,"event":null,"group_size":null,"quantity_hint":null,"b2b_context":false,"recurring_purchase":false,"brand_preference":null,"price_sensitivity":null,"missing_entities":[],"competitor_mention":null,"urgency":false,"educator_discount_prompt":false},
+    "step4_decomposition": null,
+    "step5_clarification": null
+  },
+  "output": {
+    "intent_class":"","routing":"","zero_result_rescue_triggered":false,"out_of_catalog":false,"out_of_catalog_reason":null,"goal":null,"nav_categories":[],"decomposed_sections":[],"clarification":null,"b2b_escalation":null,"service_redirect":null,"replenishment":null,"rescue_suggestions":[],"filters":{},"confidence":0.95,
+    "message":{"headline":"","subtitle":""}
+  }
+}
 
-## ROUTING VALUES
-- multi_category_guided: occasion_goal with multiple categories
-- direct_search: keyword_product
-- brand_filtered: brand_lookup
-- zero_result_rescue: triggered rescue
+For occasion_goal populate step4_decomposition:
+{"goal":"string","nav_categories":[{"label":"","category_id":"cat_x","plp_url":"/path","br_query":""}],"decomposed_sections":[{"section_title":"","category_ids":[],"featured_br_query":""}]}
+Max 8 nav_categories. Max 4 decomposed_sections. Copy into output fields.
 
-## DYNAMIC MESSAGE
-Always generate a helpful headline and subtitle based on the query and intent."""
+For clarification_needed populate step5_clarification:
+{"clarification_question":"","clarification_options":[]}
+Copy into output.clarification as {"question":"","options":[]}.
+
+For b2b_escalation: output.b2b_escalation = {"reason":"","action":""}
+For service_redirect: output.service_redirect = {"service_type":"","cta":""}
+For replenishment: output.replenishment = {"product_hint":"","reorder_message":""}
+For zero_result_rescue: output.rescue_suggestions = [{"label":"","br_query":""}] max 3 items
+
+ROUTING VALUES: multi_category_guided, direct_search, brand_filtered, zero_result_rescue, clarification_needed, b2b_escalation, service_redirect, replenishment, attribute_question, compatibility_tool"""
 
 
 async def classify_query(query: str) -> dict:
 
-    llm = ChatAnthropic(
-        model="claude-sonnet-4-6",
-        api_key=os.getenv("ANTHROPIC_API_KEY"),
-        max_tokens=4000
+    # Using Anthropic SDK directly for prompt caching
+    # LangChain does not support cache_control yet
+    client = anthropic.AsyncAnthropic(
+        api_key=os.getenv("ANTHROPIC_API_KEY")
     )
 
-    human_content = f"Query: {query}"
+    response = await client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=4000,
+        temperature=0,
 
-    messages = [
-        SystemMessage(content=SYSTEM_PROMPT),
-        HumanMessage(content=human_content)
-    ]
+        system=[
+            {
+                "type": "text",
+                "text": SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"}
+                
+            }
+        ],
 
-    response = await llm.ainvoke(messages)
+        messages=[
+            {
+                "role": "user",
+                "content": f"Query: {query}"
+                # Only the user query changes each time
+                # System prompt is served from cache
+            }
+        ]
+    )
 
-    raw = response.content.strip()
+    raw = response.content[0].text.strip()
+
+    # Cache usage info for debugging
+    if hasattr(response, "usage"):
+        usage = response.usage
+        cache_read = getattr(usage, "cache_read_input_tokens", 0)
+        cache_create = getattr(usage, "cache_creation_input_tokens", 0)
+        if cache_read > 0:
+            print(f" Cache HIT: {cache_read} tokens served from cache")
+        elif cache_create > 0:
+            print(f" Cache CREATED: {cache_create} tokens cached")
 
     if raw.startswith("```"):
         raw = raw.split("```")[1]
@@ -173,12 +164,70 @@ async def classify_query(query: str) -> dict:
             raw = raw[4:]
     raw = raw.strip()
 
-    result = json.loads(raw)
+    try:
+        result = json.loads(raw)
 
-    nav_cats = result.get("nav_categories") or []
-    intent = result.get("intent_class") or result.get("pipeline", {}).get("step2_intent", {}).get("intent_class", "unknown")
-    confidence = result.get("confidence") or result.get("pipeline", {}).get("step2_intent", {}).get("confidence", 0)
-    print(f" Classified: {intent} ({confidence})")
-    print(f" Nav categories: {len(nav_cats)}")
+    except json.JSONDecodeError as e:
+        print(f"⚠️ JSON parse error: {e}")
+        result = {
+            "pipeline": {
+                "step1_normalization": {
+                    "raw_query": query,
+                    "normalized": query,
+                    "spell_corrected": False,
+                    "filler_removed": False
+                },
+                "step2_intent": {
+                    "intent_class": "occasion_goal",
+                    "confidence": 0.7,
+                    "reasoning": "Fallback response"
+                },
+                "step3_entities": {
+                    "persona": None, "persona_ambiguous": False,
+                    "space": None, "event": None, "group_size": None,
+                    "quantity_hint": None, "b2b_context": False,
+                    "recurring_purchase": False, "brand_preference": None,
+                    "price_sensitivity": None, "missing_entities": [],
+                    "competitor_mention": None, "urgency": False,
+                    "educator_discount_prompt": False
+                },
+                "step4_decomposition": None,
+                "step5_clarification": None
+            },
+            "output": {
+                "intent_class": "occasion_goal",
+                "routing": "multi_category_guided",
+                "zero_result_rescue_triggered": False,
+                "out_of_catalog": False,
+                "out_of_catalog_reason": None,
+                "goal": query,
+                "nav_categories": [],
+                "decomposed_sections": [],
+                "clarification": None,
+                "b2b_escalation": None,
+                "service_redirect": None,
+                "replenishment": None,
+                "rescue_suggestions": [],
+                "filters": {},
+                "confidence": 0.7,
+                "message": {
+                    "headline": f"Shopping for: {query}",
+                    "subtitle": "Find what you need at Staples."
+                }
+            }
+        }
+
+    intent = (
+        result.get("output", {}).get("intent_class")
+        or result.get("pipeline", {}).get("step2_intent", {}).get("intent_class")
+        or "unknown"
+    )
+
+    routing = (
+        result.get("output", {}).get("routing")
+        or "unknown"
+    )
+
+    print(f" Intent: {intent} | Routing: {routing}")
 
     return result
